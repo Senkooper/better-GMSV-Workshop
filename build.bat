@@ -1,3 +1,0 @@
-g++ -shared -o gmsv_workshop_win64.dll -I "C:/sdk" main.cpp "C:\sdk\steamworks_157\sdk\redistributable_bin\win64\steam_api64.lib"
-set /p var=Hit ENTER to continue...
-
