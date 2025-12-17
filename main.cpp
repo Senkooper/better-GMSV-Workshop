@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <deque>
+#include <mutex>
 
 
 #ifdef __linux__
@@ -99,6 +100,8 @@ public:
          
     }
     static bool isSteamServerInit;
+
+    static std::mutex mutex;
     static void (*initCallback)(bool,GarrysMod::Lua::ILuaBase*);
     
     static bool ready;
@@ -116,6 +119,8 @@ private:
 
     
 };
+
+
 
 //void GMSV::steamServerConnected(SteamServersConnected_t*){
     ///initState = static_cast<GMSVInitState>((initState & ~eUnready) | eReady);
@@ -139,6 +144,7 @@ void (*GMSV::initCallback)(bool,GarrysMod::Lua::ILuaBase*);
 bool GMSV::exit;
 bool GMSV::isSteamServerInit;
 bool GMSV::ready;
+std::mutex GMSV::mutex;
 
 
 class GMSVWorkshop {
@@ -244,7 +250,6 @@ private:
     static std::unordered_map<uint64, Item*> downloading;
    
     static std::deque<Item*> finished;
-
    
     static GMSVWorkshop* workshop;
 
@@ -323,20 +328,7 @@ private:
 
             
 
-        while (pending.size() > 0)
-        {
-            item = pending.back();
-            if (!SteamGameServerUGC()->DownloadItem(item->workshopId,false)){
-
-                luaState->luabase->ReferencePush(item->downloadCallbackRef);
-                nullCallback(luaState->luabase);
-                luaState->luabase->ReferenceFree(item->downloadCallbackRef);
-
-                downloading.erase(item->workshopId);
-                delete item;
-            }
-            pending.pop_back();
-        }
+        
     
         if (finished.size() > 0){
             int fileRef;
@@ -393,14 +385,14 @@ private:
                                             luaState->luabase->Call(1,0);
                                             luaState->luabase->Pop();
                                             luaState->luabase->ReferenceFree(fileRef);
-                                           SteamGameServer()->LogOff();
+                                           /*SteamGameServer()->LogOff();
                                             luaState->luabase->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB ); // Push the global table
                 luaState->luabase->GetField( -1, "print" ); // Get the print function
                 luaState->luabase->PushNumber(2080);
                 luaState->luabase->Call( 1, 0 ); // Call the function
-                luaState->luabase->Pop(); // Pop the global table off the stack
+                luaState->luabase->Pop(); // Pop the global table off the stack;*/
                                         }
-                                       // item->downloadResult = k_EResultFail;
+                                       // item->downloadResult = k_EResultFail
                                     
                             }
                             
@@ -428,7 +420,20 @@ private:
 
         }
         
+        while (pending.size() > 0)
+        {
+            item = pending.back();
+            if (!SteamGameServerUGC()->DownloadItem(item->workshopId,false)){
 
+                luaState->luabase->ReferencePush(item->downloadCallbackRef);
+                nullCallback(luaState->luabase);
+                luaState->luabase->ReferenceFree(item->downloadCallbackRef);
+
+                downloading.erase(item->workshopId);
+                delete item;
+            }
+            pending.pop_back();
+        }
 
         if (downloading.size() == 0) {
             removeRunHook(luaState->luabase);
@@ -551,10 +556,14 @@ void GMSVWorkshop::onDownloadItem(DownloadItemResult_t* res) {
 
 
    
-    Item* item = downloading[res->m_nPublishedFileId];
-    item->downloadResult = res->m_eResult;
+   
      //testId = item->downloadResult->m_nPublishedFileId;
+
+    GMSV::mutex.lock();
+     Item* item = downloading[res->m_nPublishedFileId];
+    item->downloadResult = res->m_eResult;
     finished.push_back(item);
+    GMSV::mutex.unlock();
     
 }
 
