@@ -21,18 +21,59 @@
 
 
 
+
+
 class GMSV{
-public:
+public: 
 
 
     //THE ENTIRE MODULE IS UNLOADED INCLUDING ALL STATIC CLASSES ETC FOR EACH SERVER UNLOAD
 
 
+
     
-    static void init(GarrysMod::Lua::ILuaBase* lua,void(*initCallback)(bool,GarrysMod::Lua::ILuaBase*)){
+
+    
 
 
+    static void addDebugMsg(int code, 
+        std::string msg,
+        int threadCode){
+        std::lock_guard lock(GMSV::mutex);
+
+        debugMsgs.push_back("message code: "+std::to_string(code)+" message: "+msg+" thread code: "+std::to_string(threadCode));
        
+    }
+
+    static void runHook(GarrysMod::Lua::ILuaBase* lua, const char* eventName, const char* id,int (*func)(lua_State*)){
+        lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+        lua->GetField(-1, "hook");
+        lua->GetField(-1, "Add");
+        lua->PushString(eventName);
+        lua->PushString(id);
+        lua->PushCFunction(func);
+        lua->Call(3, 0);
+        lua->Pop(2);
+    }
+
+    static void removeHook(GarrysMod::Lua::ILuaBase* lua,
+         const char* eventName, const char* id){
+        lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+        lua->GetField(-1, "hook");
+        lua->GetField(-1, "Remove");
+        lua->PushString(eventName);
+        lua->PushString(id);
+        lua->Call(2, 0);
+        lua->Pop(2);
+    }
+
+    
+    
+    
+    static void init(GarrysMod::Lua::ILuaBase* lua,void(*initCallback)(bool,GarrysMod::Lua::ILuaBase*),void(*shutDownCallback)(GarrysMod::Lua::ILuaBase*)){
+
+
+        runHook(lua,"Think","GMSVDebug",printDebugMsgs);
         ready = true;
         //TODO: should only create this once per server cycle and not again when something goes wrong
         if (!gmsv){
@@ -76,7 +117,7 @@ public:
         
 
         GMSV::initCallback = initCallback;
-        
+        GMSV::shutDownCallback = shutDownCallback;
        
         
         
@@ -86,8 +127,11 @@ public:
 
     
 
-    static void shutDown(){
+    static void shutDown(GarrysMod::Lua::ILuaBase* lua){
+
+        shutDownCallback(lua);
          delete gmsv;
+         gmsv = nullptr;
          if (isSteamServerInit){
             //exitingRunSteamCallbacks = false;
             exit = true;
@@ -101,20 +145,53 @@ public:
     }
     static bool isSteamServerInit;
 
-    static std::mutex mutex;
-    static void (*initCallback)(bool,GarrysMod::Lua::ILuaBase*);
     
-    static bool ready;
+    static void (*initCallback)(bool,GarrysMod::Lua::ILuaBase*);
+    static void(*shutDownCallback)(GarrysMod::Lua::ILuaBase*);
+    
+    
+    static bool getReady(){
+        std::lock_guard lock(mutex);
+        return ready;
+    }
 
+    static void setReady(bool ready){
+        std::lock_guard lock(mutex);
+        GMSV::ready = ready;
+        
+    }
+
+     static const char* gmodModuleName;
 private:
     STEAM_GAMESERVER_CALLBACK(GMSV,steamServerConnectFail, SteamServerConnectFailure_t);
     STEAM_GAMESERVER_CALLBACK(GMSV,steamServerDisconnected,SteamServersDisconnected_t);
 
-    
+    static std::vector<std::string> debugMsgs; 
 
-  
+   
+    static int printDebugMsgs(lua_State* luaState){
+        if (debugMsgs.size() > 0){
+             std::lock_guard lock(mutex);
+            luaState->luabase->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB ); 
+            luaState->luabase->GetField( -1, "print" );
+            std::string msg;
+            std::string fromGmodModuleName = "from "+std::string(gmodModuleName)+": ";
+            msg = fromGmodModuleName+debugMsgs[0];
+            for(int msgI = 1; msgI < debugMsgs.size(); msgI++){
+                msg+= "\n"+fromGmodModuleName+debugMsgs[msgI];
+            }
+            luaState->luabase->Call( 1, 0 ); 
+            luaState->luabase->Pop();
+        }
+
+        return 0;
+       
+        
+    }
+    static bool ready;
     static bool exit;
     static GMSV* gmsv;
+    static std::mutex mutex;
      
 
     
@@ -130,22 +207,24 @@ void GMSV::steamServerConnectFail(SteamServerConnectFailure_t* res){
         //initState = eUnready;
         return;
     }
-
+    std::lock_guard lock(mutex);
     ready = false;
 }
 
 void GMSV::steamServerDisconnected(SteamServersDisconnected_t*){
+    std::lock_guard lock(mutex);
     ready = false;
 }
 
 
 GMSV* GMSV::gmsv;
 void (*GMSV::initCallback)(bool,GarrysMod::Lua::ILuaBase*);
+void(*GMSV::shutDownCallback)(GarrysMod::Lua::ILuaBase*);
 bool GMSV::exit;
 bool GMSV::isSteamServerInit;
 bool GMSV::ready;
 std::mutex GMSV::mutex;
-
+std::vector<std::string> GMSV::debugMsgs;
 
 class GMSVWorkshop {
 public:
@@ -161,33 +240,23 @@ public:
                // luaState->luabase->Call( 1, 0 ); // Call the function
                // luaState->luabase->Pop(); // Pop the global table off the stack
 
-            
-            if (!GMSV::ready){
-                
-                removeRunHook(luaState->luabase);
-                GMSV::init(luaState->luabase,GMSV::initCallback);
-                return 0;
-            }
-            if (!initWorkshop(luaState->luabase)){
+            //std::lock_guard lock(GMSV::mutex);
+            if (!isWorkshopInit(luaState->luabase)){
                 return 0;
             }
             
            
              //if (downloading.size() > 0){
-            runHook(luaState->luabase);
+            GMSV::runHook(luaState->luabase,"Think","GMSVWorkshopRun",run);
            // }
             return 0;
         };
 
         if (downloading.size() > 0){
-            runHook(lua);
+             GMSV::runHook(lua,"Think","GMSVWorkshopRun",run);
         }
 
-              lua->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB ); // Push the global table
-                lua->GetField( -1, "print" ); // Get the print function
-                lua->PushString("TRYING TO INIT");
-                lua->Call( 1, 0 ); // Call the function
-           lua->Pop(); // Pop the global table off the stack
+        GMSV::addDebugMsg(tryInit,"Trying to init",main);
 
         lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
         lua->GetField(-1, "steamworks");
@@ -199,8 +268,12 @@ public:
         return 0;
     }
 
-    static void shutDown(){
+   
+
+    static void shutDown(GarrysMod::Lua::ILuaBase* lua){
+        GMSV::removeHook(lua,"Think","GMSVWorkshopRun");
         delete workshop;
+        workshop = nullptr;
         //pending.clear();
         //finished.clear();
         for (auto pair = downloading.begin(); pair != downloading.end(); ++pair){
@@ -246,7 +319,7 @@ private:
     static std::vector<Item*> pending;
 
     
-
+    static std::mutex mutex;
     static std::unordered_map<uint64, Item*> downloading;
    
     static std::deque<Item*> finished;
@@ -257,30 +330,10 @@ private:
   
 
 
-    static void removeRunHook(GarrysMod::Lua::ILuaBase* lua){
-        lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-        lua->GetField(-1, "hook");
-        lua->GetField(-1, "Remove");
-        lua->PushString("Think");
-        lua->PushString("GMSVWorkshopRun");
-        lua->Call(2, 0);
-        lua->Pop(2);
-    }
-
-    static void runHook(GarrysMod::Lua::ILuaBase* lua){
-        lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-        lua->GetField(-1, "hook");
-        lua->GetField(-1, "Add");
-        lua->PushString("Think");
-        lua->PushString("GMSVWorkshopRun");
-        lua->PushCFunction(run);
-        lua->Call(3, 0);
-        lua->Pop(2);
-    }
-
+    
     
 
-    static bool initWorkshop(GarrysMod::Lua::ILuaBase* lua){
+    static bool isWorkshopInit(GarrysMod::Lua::ILuaBase* lua){
         
         
          
@@ -292,8 +345,11 @@ private:
         if (!workshop){
             workshop = new GMSVWorkshop();
             if (!SteamGameServerUGC()->BInitWorkshopForGameServer(4000,(std::filesystem::current_path() / "garrysmod/cache/gmsv_workshop").string().c_str())){
-                GMSV::ready = false;
-                
+                GMSV::setReady(false);
+                GMSV::runHook(lua,"Think","GMSVWorkshopRun",run);
+                delete workshop;
+                workshop = nullptr;
+                GMSV::init(lua,GMSV::initCallback,GMSV::shutDownCallback);
                 return 0;
             }
         }
@@ -311,18 +367,34 @@ private:
 
   
     
+    enum WorkshopErrCodes{
+        notGetAddon,
+        gotAddon,
+        tryInit
+    };
+
+    enum WorkshopThreadCode{
+        main
+    };
+
+   
+
 
     static int runCallbacks(lua_State* luaState) {
 
 
         //TODO fix this initState is no longer 0 in UnInit mode 
-        if (!GMSV::ready){
+
+        
+        
+        if (!GMSV::getReady()){
                 
-            removeRunHook(luaState->luabase);
-            GMSV::init(luaState->luabase,GMSV::initCallback);
+           
+            GMSV::removeHook(luaState->luabase,"Think","GMSVWorkshopRun");
+            GMSV::init(luaState->luabase,GMSV::initCallback,GMSV::shutDownCallback);
             return 0;
         }
-
+        std::lock_guard lock(mutex);
         Item* item;
         
 
@@ -337,11 +409,6 @@ private:
 
             item = finished.front();
             luaState->luabase->ReferencePush(item->downloadCallbackRef);
-           // luaState->luabase->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB ); // Push the global table
-           //     luaState->luabase->GetField( -1, "print" ); // Get the print function
-          //      luaState->luabase->PushString("OK IT DOWNLOADED v203");
-         //       luaState->luabase->Call( 1, 0 ); // Call the function
-        //    luaState->luabase->Pop(); // Pop the global table off the stack
             if (item->downloadResult == k_EResultOK){
                 if (SteamGameServerUGC()->GetItemInstallInfo(item->workshopId, nullptr, downloadFolder,sizeof(downloadFolder),nullptr)) {
                         
@@ -385,14 +452,11 @@ private:
                                             luaState->luabase->Call(1,0);
                                             luaState->luabase->Pop();
                                             luaState->luabase->ReferenceFree(fileRef);
-                                           /*SteamGameServer()->LogOff();
                                             luaState->luabase->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB ); // Push the global table
-                luaState->luabase->GetField( -1, "print" ); // Get the print function
-                luaState->luabase->PushNumber(2080);
-                luaState->luabase->Call( 1, 0 ); // Call the function
-                luaState->luabase->Pop(); // Pop the global table off the stack;*/
+                                            SteamGameServer()->LogOff();
+                                            GMSV::addDebugMsg(gotAddon,"Got addon",main);
                                         }
-                                       // item->downloadResult = k_EResultFail
+     
                                     
                             }
                             
@@ -403,7 +467,9 @@ private:
 
             }
             if (item->downloadResult != k_EResultOK){
+                
                 nullCallback(luaState->luabase);
+                GMSV::addDebugMsg(notGetAddon,"could not get addon reason: "+std::to_string(item->downloadResult),main);
             }
 
         
@@ -436,7 +502,7 @@ private:
         }
 
         if (downloading.size() == 0) {
-            removeRunHook(luaState->luabase);
+            GMSV::removeHook(luaState->luabase,"Think","GMSVWorkshopRun");
         }
        
 
@@ -460,7 +526,7 @@ private:
 
        
 
-
+       
 
         luaState->luabase->CheckType(1, GarrysMod::Lua::Type::String);
 
@@ -484,7 +550,7 @@ private:
            nullCallback(luaState->luabase);
            return 0;
        }
-      
+        std::lock_guard lock(mutex);
 
    
        if (downloading[workshopId]){
@@ -501,7 +567,7 @@ private:
         downloading[workshopId] = item;
 
        
-       if (initWorkshop(luaState->luabase)){
+       if (isWorkshopInit(luaState->luabase)){
             
             if (!SteamGameServerUGC()->DownloadItem(workshopId, false))
                 {
@@ -518,7 +584,7 @@ private:
 
        if (downloading.size() == 1){
 
-            runHook(luaState->luabase);
+            GMSV::runHook(luaState->luabase,"Think","GMSVWorkshopRun",run);
        }
 
        
@@ -539,7 +605,7 @@ private:
 
 std::unordered_map<uint64, GMSVWorkshop::Item*> GMSVWorkshop::downloading;
 std::deque<GMSVWorkshop::Item*> GMSVWorkshop::finished;
-
+std::mutex GMSVWorkshop::mutex;
 GMSVWorkshop* GMSVWorkshop::workshop;
 std::vector<GMSVWorkshop::Item*> GMSVWorkshop::pending;
 
@@ -559,11 +625,11 @@ void GMSVWorkshop::onDownloadItem(DownloadItemResult_t* res) {
    
      //testId = item->downloadResult->m_nPublishedFileId;
 
-    GMSV::mutex.lock();
+    std::lock_guard lock(mutex);
      Item* item = downloading[res->m_nPublishedFileId];
     item->downloadResult = res->m_eResult;
     finished.push_back(item);
-    GMSV::mutex.unlock();
+   
     
 }
 
@@ -572,6 +638,7 @@ void GMSVWorkshop::onDownloadItem(DownloadItemResult_t* res) {
 
 
 
+const char* GMSV::gmodModuleName = "gmsv_workshop";
 //bool initServer = true;
 GMOD_MODULE_OPEN()
 {
@@ -580,7 +647,7 @@ GMOD_MODULE_OPEN()
 
     
 
-    
+    GMSV::addDebugMsg(0,"Using unreleased version 1.00",0);
 
 
     
@@ -603,21 +670,9 @@ GMOD_MODULE_OPEN()
                 SteamGameServer()->LogOnAnonymous();
             }
         }
-
         
-        
-    //    if (SteamGameServerUGC()->BInitWorkshopForGameServer(4000,(std::filesystem::current_path()+="/garrysmod/cache/gmsv_workshop").string().c_str())){
-      //       lua->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB ); // Push the global table
-        //        lua->GetField( -1, "print" ); // Get the print function
-        //        lua->PushString("COULD INIT WORKSHOP FOR GAME SERVER");
-        //        lua->Call( 1, 0 ); // Call the function
-        //    lua->Pop(); // Pop the global table off the stack
-       // }
-         
-         //return initState;
-        
-       
-        
+    },[](GarrysMod::Lua::ILuaBase* lua){
+        GMSVWorkshop::shutDown(lua);
     });
 
 
@@ -637,8 +692,8 @@ GMOD_MODULE_OPEN()
 GMOD_MODULE_CLOSE()
 {
    
-    GMSV::shutDown();
-    GMSVWorkshop::shutDown();
+    GMSV::shutDown(LUA);
+    //GMSVWorkshop::shutDown(LUA);
     
  
    
