@@ -295,6 +295,9 @@ private:
             this->downloadCallbackRef = downloadCallbackRef;
    
         }
+
+
+        
     };
 
     //static void(*hello)(DownloadItemResult_t*);
@@ -412,7 +415,7 @@ private:
                                 auto iter = std::filesystem::directory_iterator(downloadFolder);
                                 if (iter->exists()){
                                     path = std::filesystem::relative(iter->path(),std::filesystem::current_path() / "garrysmod/").string();
-                                    //path = "sex";
+                                    
                                 }else{
                                     item->downloadResult = k_EResultFail;
                                     
